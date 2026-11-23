@@ -15,9 +15,8 @@ import android.provider.MediaStore;
 import android.text.InputType;
 import android.util.Log;
 import android.view.Gravity;
-import android.view.Menu;
-import android.view.MenuItem;
 import android.view.ViewGroup;
+import android.webkit.JavascriptInterface;
 import android.webkit.PermissionRequest;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
@@ -39,14 +38,20 @@ import java.util.List;
 
 /**
  * پوسته اندرویدی پیامرسان داخلی.
- * قبل از بارگذاری سایت، آدرس هاست را میگیرد و آنرا ذخیره میکند.
- * با منوی «آدرس سرور» میشود آدرس را عوض کرد (برای زمانی که دامنه تغییر میکند).
+ * آدرس هاست فقط بار اول پرسیده میشود؛ بعداً از منوی همبرگری داخل programs قابل تغییر است.
+ * اعلانها حتی وقتی صفحه بسته است توسط NotificationService ارسال میشوند.
  */
 public class MainActivity extends Activity {
 
     private static final String TAG = "MessengerWrapper";
     private static final String PREFS = "messenger_prefs";
     private static final String KEY_URL = "server_url";
+    private static final String KEY_TOKEN = "notif_token";
+    private static final String KEY_ME = "notif_me_id";
+    private static final String KEY_ME_NAME = "notif_me_name";
+    private static final String KEY_CHATS = "notif_chats";
+    private static final String KEY_CUR = "notif_current_chat";
+    private static final String KEY_FOREGROUND = "notif_foreground";
     private static final int REQ_PERMISSIONS = 101;
     private static final int REQ_FILE_CHOOSER = 102;
 
@@ -56,26 +61,87 @@ public class MainActivity extends Activity {
     private Uri cameraUri;
     private String pendingUrl;
     private String currentBase;
+    private String pendingChatId;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        Notifier.ensureChannels(this);
+        setForegroundFlag("1");
+        handleIncomingIntent(getIntent());
         String saved = loadUrl();
         if (saved == null || saved.isEmpty()) showSetup(null);
         else requestPermissionsThenOpen(saved);
     }
 
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        handleIncomingIntent(intent);
+    }
+
+    private void handleIncomingIntent(Intent intent) {
+        if (intent == null) return;
+        String id = intent.getStringExtra("chat_id");
+        if (id != null && !id.isEmpty()) {
+            pendingChatId = id;
+            if (web != null) deliverPendingChat();
+        }
+    }
+
+    private void deliverPendingChat() {
+        if (web == null || pendingChatId == null) return;
+        final String id = pendingChatId;
+        pendingChatId = null;
+        web.evaluateJavascript(
+                "if(window.openChatFromNative){window.openChatFromNative('" + id + "');}", null);
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        setForegroundFlag("1");
+    }
+
+    @Override
+    protected void onPause() {
+        setForegroundFlag("0");
+        super.onPause();
+    }
+
+    @Override
+    protected void onDestroy() {
+        setForegroundFlag("0");
+        super.onDestroy();
+    }
+
     /* ───────── تنظیمات ذخیره آدرس ───────── */
 
+    private android.content.SharedPreferences prefs() {
+        return getSharedPreferences(PREFS, MODE_PRIVATE);
+    }
+
     private String loadUrl() {
-        return getSharedPreferences(PREFS, MODE_PRIVATE).getString(KEY_URL, "");
+        return prefs().getString(KEY_URL, "");
     }
 
     private void saveUrl(String url) {
-        android.content.SharedPreferences.Editor e = getSharedPreferences(PREFS, MODE_PRIVATE).edit();
+        android.content.SharedPreferences.Editor e = prefs().edit();
         if (url == null || url.isEmpty()) e.remove(KEY_URL);
         else e.putString(KEY_URL, url);
         e.apply();
+    }
+
+    private void setPref(String key, String value) {
+        android.content.SharedPreferences.Editor e = prefs().edit();
+        if (value == null || value.isEmpty()) e.remove(key);
+        else e.putString(key, value);
+        e.apply();
+    }
+
+    private void setForegroundFlag(String v) {
+        setPref(KEY_FOREGROUND, v);
     }
 
     /** آدرس واردشده را پاک و استاندارد میکند و «index.html» اضافه نمیکند. */
@@ -155,7 +221,7 @@ public class MainActivity extends Activity {
         });
 
         TextView note = new TextView(this);
-        note.setText("بعداً از منوی بالای صفحه ← «آدرس سرور» میتوانید آدرس را عوض کنید.");
+        note.setText("بعداً از منوی همبرگری داخل برنامه ← «آدرس سرور» میتوانید آدرس را عوض کنید.");
         note.setTextSize(12);
         note.setTextColor(0xFF94A3B8);
         note.setGravity(Gravity.CENTER);
@@ -180,6 +246,8 @@ public class MainActivity extends Activity {
             if (checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED)
                 need.add(android.Manifest.permission.RECORD_AUDIO);
             if (Build.VERSION.SDK_INT >= 33) {
+                if (checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED)
+                    need.add(android.Manifest.permission.POST_NOTIFICATIONS);
                 if (checkSelfPermission(android.Manifest.permission.READ_MEDIA_IMAGES) != PackageManager.PERMISSION_GRANTED)
                     need.add(android.Manifest.permission.READ_MEDIA_IMAGES);
                 if (checkSelfPermission(android.Manifest.permission.READ_MEDIA_VIDEO) != PackageManager.PERMISSION_GRANTED)
@@ -214,7 +282,7 @@ public class MainActivity extends Activity {
         progress = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
         progress.setMax(100);
         root.addView(progress, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(4)));
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(3)));
 
         web = new WebView(this);
         WebSettings s = web.getSettings();
@@ -229,6 +297,8 @@ public class MainActivity extends Activity {
         s.setCacheMode(WebSettings.LOAD_DEFAULT);
         String ua = s.getUserAgentString();
         s.setUserAgentString((ua == null ? "" : ua + " ") + "MessengerAndroid/1.0");
+
+        web.addJavascriptInterface(new JsBridge(), "MessengerBridge");
 
         web.setWebViewClient(new WebViewClient() {
             @Override
@@ -249,6 +319,9 @@ public class MainActivity extends Activity {
             @Override
             public void onPageFinished(WebView view, String url) {
                 progress.setVisibility(ProgressBar.GONE);
+                view.evaluateJavascript(
+                        "if(window.__messengerNativeReady){window.__messengerNativeReady();}", null);
+                deliverPendingChat();
             }
 
             @Override
@@ -376,27 +449,76 @@ public class MainActivity extends Activity {
         cameraUri = null;
     }
 
-    /* ───────── منو ───────── */
+    /* ───────── پل جاوااسکریپت ───────── */
 
-    @Override
-    public boolean onCreateOptionsMenu(Menu menu) {
-        menu.add(0, 1, 0, "آدرس سرور");
-        menu.add(0, 2, 0, "تازهسازی");
-        return true;
+    public class JsBridge {
+        @JavascriptInterface
+        public void setToken(String token) {
+            setPref(KEY_TOKEN, token == null ? "" : token.trim());
+            if (token == null || token.trim().isEmpty()) stopNotificationService();
+            else startNotificationService();
+        }
+
+        @JavascriptInterface
+        public void setMe(String id, String name) {
+            setPref(KEY_ME, id);
+            setPref(KEY_ME_NAME, name);
+        }
+
+        @JavascriptInterface
+        public void syncChats(String json) {
+            setPref(KEY_CHATS, json == null ? "{}" : json);
+        }
+
+        @JavascriptInterface
+        public void setCurrentChat(String id) {
+            setPref(KEY_CUR, id == null ? "" : id);
+        }
+
+        @JavascriptInterface
+        public void setForeground(String on) {
+            setForegroundFlag("1".equals(on) ? "1" : "0");
+        }
+
+        @JavascriptInterface
+        public void notify(String title, String body, String chatId) {
+            Notifier.show(MainActivity.this, title, body, chatId);
+        }
+
+        @JavascriptInterface
+        public String serverUrl() {
+            return currentBase == null ? "" : currentBase;
+        }
+
+        @JavascriptInterface
+        public void changeServer() {
+            runOnUiThread(MainActivity.this::showUrlDialog);
+        }
+
+        @JavascriptInterface
+        public void logout() {
+            setPref(KEY_TOKEN, "");
+            setPref(KEY_CHATS, "{}");
+            setPref(KEY_CUR, "");
+            stopNotificationService();
+        }
     }
 
-    @Override
-    public boolean onOptionsItemSelected(MenuItem item) {
-        if (item.getItemId() == 1) {
-            showUrlDialog();
-            return true;
+    private void startNotificationService() {
+        try {
+            Intent i = new Intent(this, NotificationService.class);
+            if (Build.VERSION.SDK_INT >= 26) startForegroundService(i);
+            else startService(i);
+        } catch (Exception e) {
+            Log.w(TAG, "cannot start notification service: " + e.getMessage());
         }
-        if (item.getItemId() == 2) {
-            if (web != null) web.reload();
-            return true;
-        }
-        return super.onOptionsItemSelected(item);
     }
+
+    private void stopNotificationService() {
+        try { stopService(new Intent(this, NotificationService.class)); } catch (Exception ignored) { }
+    }
+
+    /* ───────── تغییر آدرس از منوی همبرگری ───────── */
 
     private void showUrlDialog() {
         final EditText input = new EditText(this);
