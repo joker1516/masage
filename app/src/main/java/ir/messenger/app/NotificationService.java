@@ -114,12 +114,39 @@ public class NotificationService extends Service {
 
         for (int i = 0; i < events.length(); i++) {
             JSONObject e = events.optJSONObject(i);
-            if (e == null || !"msg".equals(e.optString("type"))) continue;
+            if (e == null) continue;
+            String type = e.optString("type");
+
+            /* منشن: اعلان مخصوص، جدا از پیام معمولی */
+            if ("mention".equals(type)) {
+                String chatId = String.valueOf(e.optLong("chat_id", -1));
+                if (!curChat.isEmpty() && chatId.equals(curChat)) continue;
+                JSONObject c = chats.optJSONObject(chatId);
+                if (c != null && c.optBoolean("muted")) continue;
+                String title = c != null && !c.optString("title", "").isEmpty()
+                        ? c.optString("title") : "گروه";
+                String who = e.optString("from_name", "");
+                String text = (who.isEmpty() ? "" : who + ": ") + e.optString("preview", "");
+                if (!foreground) Notifier.show(this, "منشن در " + title, text, chatId);
+                continue;
+            }
+
+            if (!"msg".equals(type)) continue;
             JSONObject m = e.optJSONObject("message");
             if (m == null || "system".equals(m.optString("kind"))) continue;
 
             String sender = String.valueOf(m.optLong("sender_id", -1));
             if (!myId.isEmpty() && sender.equals(myId)) continue;
+
+            /* اگر همین پیام ما را منشن کرده، اعلانش را رویداد mention میدهد */
+            JSONArray men = m.optJSONArray("mentions");
+            boolean mentionsMe = false;
+            if (men != null && !myId.isEmpty()) {
+                for (int k = 0; k < men.length(); k++) {
+                    if (String.valueOf(men.optLong(k, -1)).equals(myId)) { mentionsMe = true; break; }
+                }
+            }
+            if (mentionsMe) continue;
 
             String chatId = String.valueOf(m.optLong("chat_id", -1));
             if (!curChat.isEmpty() && chatId.equals(curChat)) continue;

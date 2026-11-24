@@ -52,8 +52,8 @@ public class MainActivity extends Activity {
     private static final String KEY_CHATS = "notif_chats";
     private static final String KEY_CUR = "notif_current_chat";
     private static final String KEY_FOREGROUND = "notif_foreground";
-    private static final int REQ_PERMISSIONS = 101;
     private static final int REQ_FILE_CHOOSER = 102;
+    private static final int REQ_RUNTIME = 103;
 
     private WebView web;
     private ProgressBar progress;
@@ -62,6 +62,7 @@ public class MainActivity extends Activity {
     private String pendingUrl;
     private String currentBase;
     private String pendingChatId;
+    private String pendingPermKind;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -71,7 +72,7 @@ public class MainActivity extends Activity {
         handleIncomingIntent(getIntent());
         String saved = loadUrl();
         if (saved == null || saved.isEmpty()) showSetup(null);
-        else requestPermissionsThenOpen(saved);
+        else openApp(saved);
     }
 
     @Override
@@ -217,7 +218,7 @@ public class MainActivity extends Activity {
                 return;
             }
             saveUrl(value);
-            requestPermissionsThenOpen(value);
+            openApp(value);
         });
 
         TextView note = new TextView(this);
@@ -235,46 +236,74 @@ public class MainActivity extends Activity {
         setContentView(root);
     }
 
-    /* ───────── مجوزها ───────── */
+    /* ───────── مجوزها (فقط هنگام نیاز، نه در شروع برنامه) ───────── */
 
-    private void requestPermissionsThenOpen(String base) {
-        pendingUrl = base;
-        if (Build.VERSION.SDK_INT >= 23) {
-            List<String> need = new ArrayList<>();
-            if (checkSelfPermission(android.Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED)
-                need.add(android.Manifest.permission.CAMERA);
-            if (checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED)
-                need.add(android.Manifest.permission.RECORD_AUDIO);
-            if (Build.VERSION.SDK_INT >= 33) {
-                if (checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED)
-                    need.add(android.Manifest.permission.POST_NOTIFICATIONS);
-                if (checkSelfPermission(android.Manifest.permission.READ_MEDIA_IMAGES) != PackageManager.PERMISSION_GRANTED)
-                    need.add(android.Manifest.permission.READ_MEDIA_IMAGES);
-                if (checkSelfPermission(android.Manifest.permission.READ_MEDIA_VIDEO) != PackageManager.PERMISSION_GRANTED)
-                    need.add(android.Manifest.permission.READ_MEDIA_VIDEO);
-            } else {
-                if (checkSelfPermission(android.Manifest.permission.READ_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED)
-                    need.add(android.Manifest.permission.READ_EXTERNAL_STORAGE);
-            }
-            if (!need.isEmpty()) {
-                requestPermissions(need.toArray(new String[0]), REQ_PERMISSIONS);
+    private String[] permsFor(String kind) {
+        if (kind == null) return new String[0];
+        switch (kind) {
+            case "camera":
+                return new String[]{android.Manifest.permission.CAMERA};
+            case "mic":
+                return new String[]{android.Manifest.permission.RECORD_AUDIO};
+            case "notifications":
+                return Build.VERSION.SDK_INT >= 33
+                        ? new String[]{android.Manifest.permission.POST_NOTIFICATIONS}
+                        : new String[0];
+            case "media":
+                if (Build.VERSION.SDK_INT >= 33) {
+                    return new String[]{android.Manifest.permission.READ_MEDIA_IMAGES,
+                            android.Manifest.permission.READ_MEDIA_VIDEO};
+                }
+                return new String[]{android.Manifest.permission.READ_EXTERNAL_STORAGE};
+            default:
+                return new String[0];
+        }
+    }
+
+    private void requestRuntimePermission(final String kind) {
+        runOnUiThread(() -> {
+            String[] perms = permsFor(kind);
+            if (Build.VERSION.SDK_INT < 23 || perms.length == 0) {
+                callbackPermission(kind, true);
                 return;
             }
-        }
-        openApp(base);
+            List<String> need = new ArrayList<>();
+            for (String p : perms) {
+                if (checkSelfPermission(p) != PackageManager.PERMISSION_GRANTED) need.add(p);
+            }
+            if (need.isEmpty()) {
+                callbackPermission(kind, true);
+                return;
+            }
+            pendingPermKind = kind;
+            requestPermissions(need.toArray(new String[0]), REQ_RUNTIME);
+        });
+    }
+
+    private void callbackPermission(String kind, boolean granted) {
+        if (web == null) return;
+        String k = kind == null ? "" : kind.replace("'", "");
+        web.evaluateJavascript(
+                "if(window.onNativePermission){window.onNativePermission('" + k + "'," + granted + ");}", null);
     }
 
     @Override
     public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
-        if (requestCode == REQ_PERMISSIONS && pendingUrl != null) openApp(pendingUrl);
+        if (requestCode != REQ_RUNTIME) return;
+        boolean all = grantResults.length > 0;
+        for (int g : grantResults) if (g != PackageManager.PERMISSION_GRANTED) all = false;
+        String kind = pendingPermKind;
+        pendingPermKind = null;
+        callbackPermission(kind, all);
     }
 
     /* ───────── بارگذاری سایت ───────── */
 
     private void openApp(String base) {
         currentBase = base;
-        final String target = base + "/index.html";
+        /* پارامتر یکتا باعث می‌شود WebView نسخه قدیمی HTML/CSS را از کش نگیرد */
+        final String target = base + "/index.html?v=" + System.currentTimeMillis();
 
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
@@ -365,8 +394,10 @@ public class MainActivity extends Activity {
                 if (filePathCallback != null) filePathCallback.onReceiveValue(null);
                 filePathCallback = callback;
 
+                boolean canCamera = Build.VERSION.SDK_INT < 23
+                        || checkSelfPermission(android.Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED;
                 Intent camera = new Intent(MediaStore.ACTION_IMAGE_CAPTURE);
-                if (camera.resolveActivity(getPackageManager()) != null) {
+                if (canCamera && camera.resolveActivity(getPackageManager()) != null) {
                     cameraUri = createCameraUri();
                     if (cameraUri != null) {
                         camera.putExtra(MediaStore.EXTRA_OUTPUT, cameraUri);
@@ -485,6 +516,12 @@ public class MainActivity extends Activity {
             Notifier.show(MainActivity.this, title, body, chatId);
         }
 
+        /** درخواست مجوز فقط زمانی که کاربر از داخل برنامه به آن نیاز پیدا می‌کند. */
+        @JavascriptInterface
+        public void requestPermission(String kind) {
+            requestRuntimePermission(kind);
+        }
+
         @JavascriptInterface
         public String serverUrl() {
             return currentBase == null ? "" : currentBase;
@@ -537,7 +574,7 @@ public class MainActivity extends Activity {
                         return;
                     }
                     saveUrl(value);
-                    requestPermissionsThenOpen(value);
+                    openApp(value);
                 })
                 .setNeutralButton("پاک کردن آدرس", (DialogInterface dialog, int which) -> {
                     saveUrl(null);
